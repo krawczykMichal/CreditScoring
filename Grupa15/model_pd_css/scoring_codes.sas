@@ -1,5 +1,5 @@
 /* =====================================================
-   PD CSS – MODEL RYZYKA KREDYTU GOTÓWKOWEGO
+   PD CSS â€“ MODEL RYZYKA KREDYTU GOTÃ“WKOWEGO
    Kompletny plik SAS: model + scorecard + kalibracja
    ===================================================== */
 
@@ -11,7 +11,7 @@ data abt_all;
     set data.abt_app;
 run;
 
-/* 3. Okres 1975–1987 */
+/* 3. Okres 1975â€“1987 */
 data abt_time;
     set abt_all;
     if '197501' <= period <= '198712';
@@ -24,7 +24,7 @@ data abt_css;
     if default12 in (0,1);
 run;
 
-/* 5. Losowy podzia³ train/valid */
+/* 5. Losowy podziaÂ³ train/valid */
 data abt_css_rnd;
     set abt_css;
     u = ranuni(12345);
@@ -36,7 +36,7 @@ data train valid;
     else output valid;
 run;
 
-/* 6. Zmienne koñcowe do modelu */
+/* 6. Zmienne koÃ±cowe do modelu */
 %let model_vars_final =
     act_ccss_dueutl
     act_ccss_maxdue
@@ -61,7 +61,7 @@ proc logistic data=train descending;
     score data=valid out=score_valid p=PD_CSS;
 run;
 
-/* 8. Pobranie parametrów modelu */
+/* 8. Pobranie parametrÃ³w modelu */
 ods output ParameterEstimates = pd_css_params;
 
 proc logistic data=train descending;
@@ -70,7 +70,7 @@ run;
 
 ods output close;
 
-/* 9. Pobranie parametrów do makr */
+/* 9. Pobranie parametrÃ³w do makr */
 proc sql noprint;
     select estimate into :intercept
     from pd_css_params
@@ -83,7 +83,7 @@ proc sql noprint;
     %let nvars=&sqlobs;
 quit;
 
-/* 10. SCORECARD – przeliczenie modelu na punkty */
+/* 10. SCORECARD â€“ przeliczenie modelu na punkty */
 data scorecard_css;
     set abt_css;
 
@@ -93,21 +93,21 @@ data scorecard_css;
         %let v = &&var&i;
         %let b = &&est&i;
 
-        /* Punkty = beta * wartoœæ / 0.05 */
+        /* Punkty = beta * wartoÅ“Ã¦ / 0.05 */
         PSC_&v = &b * &v / 0.05;
         SCORECARD_POINTS + PSC_&v;
     %end;
 
 run;
 
-/* 11. Kalibracja PD z punktów */
+/* 11. Kalibracja PD z punktÃ³w */
 
-/* Œredni default */
+/* Å’redni default */
 proc sql noprint;
     select mean(default12) into :avg_pd from abt_css;
 quit;
 
-/* Ustalony wspó³czynnik nachylenia */
+/* Ustalony wspÃ³Â³czynnik nachylenia */
 %let b = -0.05;
 
 /* Wyznaczenie interceptu kalibracyjnego */
@@ -128,3 +128,4 @@ run;
 /* =====================================================
    KONIEC PLIKU
    ===================================================== */
+
