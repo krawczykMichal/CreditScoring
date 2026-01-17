@@ -1,5 +1,5 @@
-data cal_score;
-    set &zbior;
+data inlib.out;
+    set out.abt_app;
     SCORECARD_POINTS = 0;
 
     /* ACT12_N_GOOD_DAYS */
@@ -187,11 +187,16 @@ data cal_score;
     end;
 run;
 
-/* KALIBRACJA PD/
-data scored_css_cross;
-    set cal_score;
-    /* Wzór z calibration.sas - przelicza punkty na PD (0-1) */
-    prob_default_css_cross = 1/(1+exp(-(-0.028954669*SCORECARD_POINTS+8.2497434934)));
-    /* Usuń tymczasowe zmienne PSC_ */
-    drop psc: SCORECARD_POINTS;
+/* 2. KROK KALIBRACJI PD */
+data out.abt_app;
+    set inlib.out; /* Poprawka: czytamy z tabeli utworzonej wyżej */
+    
+    /* Wzór przeliczający punkty na PD (0-1) */
+    /* Upewnij się, że współczynniki (-0.0289... i 8.249...) są poprawne dla Twojego modelu */
+    prob_default_css_cross = 1 / (1 + exp( -(-0.028954669 * SCORECARD_POINTS + 8.2497434934) ));
+    
+    /* Usuwamy zmienne tymczasowe PSC_ i punkty (jeśli niepotrzebne) */
+    /* Uwaga: dwukropek 'psc:' usuwa wszystkie zmienne zaczynające się od psc */
+    drop psc:; 
+    /* Jeśli chcesz zostawić SCORECARD_POINTS do analizy, usuń go z listy drop */
 run;
