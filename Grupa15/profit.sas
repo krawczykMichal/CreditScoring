@@ -1,81 +1,110 @@
-/* 1. Ustawienie biblioteki (tam gdzie zapisałeś plik w poprzednim kroku) */
+/* (c) Karol Przanowski - Modified Version */
+/* Tylko obliczanie zysku (Profit Calculation) */
+
+options mprint;
+
+/* 1. Ścieżki i Biblioteki (Dostosuj do swojego środowiska) */
 libname out "/workspaces/workspace/Grupa15";
 
-/* 2. Parametry Symulacji (identyczne jak w mojej weryfikacji) */
-%let oprocentowanie = 0.14; /* 14% */
-%let koszt_kapitalu = 0.05; /* 5% */
-%let LGD            = 0.55; /* 55% straty przy default */
-%let koszt_staly    = 150;  /* 150 PLN za wniosek */
 
-/* 3. Przeliczenie */
-data work.weryfikacja_zysku;
-    set out.abt_scored_final;
-    
-    /* Bierzemy pod uwagę TYLKO zaakceptowane wnioski */
-    where decision = 'ACCEPT';
+/* 2. Parametry Finansowe (Symulacja biznesowa) */
+%let apr_ins=0.01;       /* Oprocentowanie roczne - Raty */
+%let apr_css=0.18;       /* Oprocentowanie roczne - Gotówka */
+%let lgd_ins=0.45;       /* Loss Given Default - Raty */
+%let lgd_css=0.55;       /* Loss Given Default - Gotówka */
+%let provision_ins=0;    /* Prowizja - Raty */
+%let provision_css=0;    /* Prowizja - Gotówka */
 
-    /* --- Ustalenie PD (Prawdopodobieństwa Defaultu) --- */
-    /* Logika: CSS bierze z modelu, INS przyjmujemy stałe 8% (bo mamy tam punkty), reszta 10% */
-    
-    length prod_norm $ 3;
-    prod_norm = strip(lowcase(product));
+/* 3. Główny Data Step - Obliczanie Zysku */
+data out.profit_calculated;
+    set out.abt_scored_final; /* Tabela wejściowa z danymi o klientach i kwotach */
 
-    if prod_norm = 'css' then do;
-        /* Jeśli brak PD, zakładamy bezpiecznie 5% */
-        Calc_PD = coalesce(PD_css_scorecard, 0.05);
+    where upcase(decision) = "ACCEPT";
+
+    /* Czyszczenie flag defaultu (zgodnie z oryginałem) */
+    if default12 in (0,.i,.d) then default12=0;
+    if default_cross12 in (0,.i,.d) then default_cross12=0;
+
+    /* Przypisanie parametrów w zależności od produktu */
+    if product='ins' then do;
+        lgd = &lgd_ins;
+        apr = &apr_ins/12; /* Konwersja na oprocentowanie miesięczne */
+        provision = &provision_ins;
     end;
-    else if prod_norm = 'ins' then do;
-        /* Dla INS w modelu były punkty, więc do symulacji finansowej 
-           przyjmujemy stałe ryzyko portfela na poziomie 8% */
-        Calc_PD = 0.08; 
+    else if product='css' then do;
+        lgd = &lgd_css;
+        apr = &apr_css/12;
+        provision = &provision_css;
+    end;
+
+    /* Parametry dla produktu Cross-Sell (zawsze Gotówka/CSS w tym scenariuszu) */
+    lgd_cross = &lgd_css;
+    apr_cross = &apr_css/12;
+    provision_cross = &provision_css;
+
+    /* --- OBLICZENIA DLA GŁÓWNEGO PRODUKTU --- */
+    
+    /* 1. Expected Loss (EL) - tutaj jako strata zrealizowana */
+    EL = 0;
+    if default12=1 then EL = app_loan_amount * lgd;
+
+    /* 2. Rata (Installment) - wzór na ratę równą */
+    if apr > 0 then do;
+        installment = app_loan_amount * apr * ((1+apr)**app_n_installments) / 
+                      (((1+apr)**app_n_installments)-1);
     end;
     else do;
-        Calc_PD = 0.10;
+        /* Zabezpieczenie na wypadek apr=0 */
+        installment = app_loan_amount / app_n_installments;
     end;
 
-    /* Zabezpieczenie zakresu PD 0-1 */
-    if Calc_PD > 1 then Calc_PD = 1;
-    if Calc_PD < 0 then Calc_PD = 0;
+    /* 3. Przychód (Income) */
+    Income = 0;
+    /* Zakładamy, że jeśli nie ma defaultu, klient spłacił wszystko + prowizję */
+    /* Uwaga: W oryginale wzór: kwota*(prowizja-1) odejmuje kapitał, 
+       żeby Income reprezentował czysty zarobek odsetkowy/prowizyjny netto przed odjęciem EL?
+       Analiza oryginału: Income = Raty - Kapitał + Prowizja. */
+    if default12=0 then Income = (app_n_installments * installment) 
+                                 + app_loan_amount * (provision - 1);
+
+    /* 4. Zysk (Profit) */
+    /* Jeśli default: Profit = 0 - Strata. Jeśli spłata: Profit = Odsetki - 0 */
+    Profit = income - el;
 
 
-    /* --- Wyliczenia Finansowe --- */
+    /* --- OBLICZENIA DLA PRODUKTU CROSS-SELL --- */
     
-    /* Czas trwania w latach (jeśli brak rat, zakładamy 2 lata) */
-    Duration_Years = coalesce(app_n_installments, 24) / 12;
+    EL_cross = 0;
+    if default_cross12=1 then EL_cross = cross_app_loan_amount * lgd_cross;
 
-    /* 1. Przychód odsetkowy (Revenue) */
-    /* Kwota * Marża (14% - 5%) * Lata */
-    Revenue = app_loan_amount * (&oprocentowanie - &koszt_kapitalu) * Duration_Years;
+    if apr_cross > 0 and cross_app_n_installments > 0 then do;
+        installment_cross = cross_app_loan_amount * apr_cross * ((1+apr_cross)**cross_app_n_installments) /
+                            (((1+apr_cross)**cross_app_n_installments)-1);
+    end;
+    else installment_cross = 0;
 
-    /* 2. Oczekiwana Strata (Expected Loss) */
-    /* Kwota * PD * LGD */
-    Expected_Loss = app_loan_amount * Calc_PD * &LGD;
+    Income_cross = 0;
+    if default_cross12=0 and cross_app_n_installments > 0 then 
+        Income_cross = (cross_app_n_installments * installment_cross)
+                       + cross_app_loan_amount * (provision_cross - 1);
+    
+    Profit_cross = income_cross - el_cross;
 
-    /* 3. Zysk Netto (Profit) */
-    /* Przychód - Koszt Stały - Strata */
-    Profit = Revenue - &koszt_staly - Expected_Loss;
 
-    format Revenue Expected_Loss Profit comma16.2;
+    /* Formatowanie i czyszczenie */
+    year = compress(put(input(period,yymmn6.),year4.));
+
+    /* Zachowaj tylko potrzebne zmienne */
+    keep aid cid product period year
+         app_loan_amount app_n_installments 
+         cross_app_loan_amount cross_app_n_installments
+         default12 default_cross12
+         EL Income Profit 
+         EL_cross Income_cross Profit_cross;
 run;
 
-/* 4. Raport Wynikowy (Podsumowanie) */
-title "Weryfikacja Zysków (Decision = ACCEPT)";
-proc sql;
-    /* Podsumowanie ogólne */
-    select 
-        "CALY PORTFEL" as Kategoria,
-        count(*) as Liczba_Umow,
-        sum(Revenue) as Suma_Przychodow format=comma16.2,
-        sum(Profit) as Suma_Zysku_Netto format=comma16.2
-    from work.weryfikacja_zysku;
-
-    /* Podsumowanie per produkt */
-    select 
-        product,
-        count(*) as Liczba_Umow,
-        sum(Revenue) as Suma_Przychodow format=comma16.2,
-        sum(Profit) as Suma_Zysku_Netto format=comma16.2
-    from work.weryfikacja_zysku
-    group by product;
-quit;
-title;
+/* Podgląd wyników */
+proc means data=out.profit_calculated n mean sum min max maxdec=2;
+    var Profit Profit_cross;
+    class product;
+run;
