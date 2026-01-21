@@ -1,146 +1,83 @@
 /* ==========================================================================
-   SCORING I DECYZJA KREDYTOWA - KOD POPRAWIONY (PROFIT FIX)
+   AUDYT FINANSOWY DECYZJI (Na podstawie istniejącej kolumny rejection_reason)
    ========================================================================== */
-
-libname inlib "/workspaces/workspace/ASBSAS/inlib";
+options mprint symbolgen;
 libname out "/workspaces/workspace/Grupa15";
 
-/* 1. Przygotowanie danych wejściowych */
-data out.abt_app;
-    set inlib.abt_app;
-run;
+/* 1. PARAMETRY FINANSOWE */
+%let apr_ins=0.01;
+%let apr_css=0.18;
+%let lgd_ins=0.45;
+%let lgd_css=0.55;
 
-/* 2. Uruchomienie modeli scoringowych 
-   Uwaga: Modele wyliczają zmienne punktowe i prawdopodobieństwa.
-   PD_css_scorecard -> Okazało się być "Prawdopodobieństwem Spłaty" (Im wyższe, tym lepiej) */
-%include "/workspaces/workspace/Grupa15/model_pd_css/scoring_code.sas";
-%include "/workspaces/workspace/Grupa15/model_pd_ins/scoring_code.sas";
-%include "/workspaces/workspace/Grupa15/model_pd_css_cross/scoring_code.sas";
-
-data out.abt_app;
-    set out.abt_app;
-    %include "/workspaces/workspace/Grupa15/model_pr_css_cross/scoring_code.sas";
-run;
-
-/* 3. SILNIK DECYZYJNY */
-data out.abt_scored_final;
-    length decision $ 30 rejection_reason $ 30;
-    set out.abt_app;
-
-    /* --- INICJALIZACJA ZMIENNYCH --- */
-    decision = 'ACCEPT';
-    rejection_reason = 'N/A';
-    cross_sell_offer = 1; 
-
-    _prod_norm = strip(lowcase(product));
-
-    /* --- PARAMETRY ODCIĘCIA (CUT-OFFS) --- */
-    /* Ustawione na podstawie analizy zyskowności (Break-even analysis) */
-    /* Pamiętaj: Zmienne oznaczają "Prawdopodobieństwo Dobrego Klienta" */
+/* 2. PRZELICZENIE WYNIKU FINANSOWEGO DLA KAŻDEGO WNIOSKU */
+data out.audit_results;
+    set out.abt_scored_final;
     
-    _cutoff_css = 0.81; /* Odrzucamy CSS poniżej 81% szans na spłatę (Ventyle 0-16 są stratne) */
-    _cutoff_ins = 0.90; /* Odrzucamy INS poniżej 90% szans na spłatę (Minimalizacja straty) */
+    /* Analizujemy okres historyczny */
+    where '197501'<=period<='198712';
 
+    /* Obsługa braków w danych o spłacie (default) */
+    if default12 in (0,.i,.d) then default12=0;
+    if default_cross12 in (0,.i,.d) then default_cross12=0;
 
-    /* --- LOGIKA BIZNESOWA --- */
-
-    /* 1. Sprawdzenie czy klient jest aktywny */
-    if active_customer_flag = 0 then do;
-        decision = 'DECLINE';
-        rejection_reason = '998: Not active customer';
-        cross_sell_offer = 0; 
+    /* A. Ustawienie parametrów per produkt */
+    if product='ins' then do;
+        lgd=&lgd_ins; 
+        apr=&apr_ins/12;
     end;
+    else if product='css' then do;
+        lgd=&lgd_css; 
+        apr=&apr_css/12;
+    end;
+
+    /* B. Obliczenie wyniku z PRODUKTU GŁÓWNEGO */
+    EL = 0;
+    if default12=1 then EL = app_loan_amount * lgd;
     
-    else do;
-        /* =========================================================
-           PRODUKT INS (Raty)
-           Strategia: Minimalizacja strat + Ochrona przed kosztami stałymi
-           ========================================================= */
-        if _prod_norm = 'ins' then do;
-            
-            /* Reguła Biznesowa: Kwota minimalna (koszty stałe) */
-            if app_loan_amount < 3000 then do;
-                decision = 'DECLINE';
-                rejection_reason = 'Biz: Low Amount (<3k)';
-            end;
+    installment = 0;
+    if app_n_installments > 0 then
+        installment = app_loan_amount*apr*((1+apr)**app_n_installments)/(((1+apr)**app_n_installments)-1);
+    
+    Income = 0;
+    if default12=0 then Income = app_n_installments*installment - app_loan_amount;
+    
+    Profit = Income - EL;
 
-            /* Reguła Biznesowa: Minimalna liczba rat */
-            else if app_n_installments < 10 then do;
-                decision = 'DECLINE';
-                rejection_reason = 'Biz: Short Tenor (<10)';
-            end;
-            
-            /* Reguła Ryzyka (POPRAWIONA LOGIKA):
-               Wcześniej: if SCORE > 0.09 (zakładając że to default).
-               Teraz: Akceptujemy tylko "Grube Ryby" z wysokim prawdopodobieństwem spłaty.
-               Używamy zmiennej PD_css_scorecard jako głównego wskaźnika (potwierdzone w teście). */
-            else if PD_css_scorecard < _cutoff_ins then do; 
-                decision = 'DECLINE';
-                rejection_reason = 'Risk: Low Score INS';
-            end;
-        end;
-
-        /* =========================================================
-           PRODUKT CSS (Gotówka)
-           Strategia: Eliminacja toksycznego portfela (Ventyle 0-16)
-           ========================================================= */
-        else if _prod_norm = 'css' then do;
-            
-            if missing(PD_css_scorecard) then do;
-                decision = 'MANUAL';
-                rejection_reason = 'ERR: Missing Score CSS';
-            end;
-            
-            else do;
-                /* Logika uproszczona (bo wszystkie kwoty to 5000 PLN).
-                   Jeśli pojawią się inne kwoty, kod zadziała bezpiecznie (wytnie ryzyko).
-                   
-                   WAŻNE: Znak nierówności "<". 
-                   Odrzucamy, jeśli Prawdopodobieństwo Spłaty jest MAŁE. */
-                   
-                if PD_css_scorecard < _cutoff_css then do;
-                    decision = 'DECLINE';
-                    rejection_reason = 'Risk: CSS Low Quality';
-                end;
-            end;
-        end;
+    /* C. Obliczenie wyniku z CROSS-SELL */
+    /* (Doliczamy go, aby mieć pełny obraz wartości klienta) */
+    lgd_cross = &lgd_css; 
+    apr_cross = &apr_css/12;
+    
+    EL_cross = 0;
+    if default_cross12=1 then EL_cross = cross_app_loan_amount * lgd_cross;
+    
+    installment_cross = 0;
+    if cross_app_n_installments > 0 then
+        installment_cross = cross_app_loan_amount*apr_cross*((1+apr_cross)**cross_app_n_installments)/(((1+apr_cross)**cross_app_n_installments)-1);
         
-        else do;
-            decision = 'ERROR';
-            rejection_reason = cat('Unknown Product Type: ', product);
-        end;
-
-        /* =========================================================
-           CROSS-SELL
-           Strategia: Oferuj tylko klientom "dobrym" i "chętnym"
-           ========================================================= */
-        if cross_sell_offer = 1 then do;
-            /* Ryzyko: Jeśli szansa na spłatę (prob_default...) jest niska, nie oferuj */
-            /* Uwaga: prob_default_css_cross też jest skalowane jako "Good" w tym modelu */
-            if prob_default_css_cross < _cutoff_css then cross_sell_offer = 0; 
-            
-            /* Responsywność: Jeśli szansa na zakup niska, nie oferuj */
-            if prob_response_css < 0.015 then cross_sell_offer = 0;
-        end;
-
-    end;
+    Income_cross = 0;
+    if default_cross12=0 then Income_cross = cross_app_n_installments*installment_cross - cross_app_loan_amount;
     
-    /* Sprzątanie zmiennych tymczasowych */
-    drop _prod_norm _cutoff_css _cutoff_ins;
+    Profit_cross = Income_cross - EL_cross;
+
+    /* Łączny wynik finansowy klienta (teoretyczny) */
+    Total_Profit = Profit + Profit_cross;
+
 run;
 
-/* --- RAPORTOWANIE WYNIKÓW --- */
-title "Podsumowanie Nowej Strategii Decyzyjnej (Logika: High Score = Good)";
+/* 3. RAPORT: ZYSK LUB STRATA WG POWODU ODRZUCENIA */
+title "Audyt Decyzji: Czy słusznie odrzuciliśmy tych klientów?";
+title2 "Dla ODRZUCONYCH: Ujemny wynik = Uniknięta strata (Sukces) | Dodatni wynik = Utracony zysk (Koszt)";
 
-proc freq data=out.abt_scored_final;
-    tables decision rejection_reason cross_sell_offer product*decision / list missing;
+proc tabulate data=out.audit_results;
+    class decision rejection_reason;
+    var Total_Profit;
+    
+    table decision * rejection_reason,
+          N='Liczba Wniosków'*f=comma12. 
+          Total_Profit * Sum='Wynik Finansowy (PLN)'*f=comma20.0
+          / box='Decyzja / Powód';
 run;
-
-/* Sprawdzenie średniego PD (Score) w grupach zaakceptowanych i odrzuconych,
-   aby upewnić się, że akceptujemy tych z WYSOKIM wynikiem */
-proc means data=out.abt_scored_final mean min max;
-    class product decision;
-    var PD_css_scorecard;
-run;
-
 title;
+title2;
